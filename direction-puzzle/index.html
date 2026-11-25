@@ -31,7 +31,7 @@
 </head>
 <body>
 <header>
-  <h1>一発指示・道案内パズル <span style="font-size:13px;color:#5f6368">地図生成プロトタイプ v0.2（ローカル確認用）</span></h1>
+  <h1>一発指示・道案内パズル <span style="font-size:13px;color:#5f6368">地図生成＋フェーズ2 パイプライン v0.5</span></h1>
   <div class="sub">密な市街地と疎な郊外が混在する非格子グラフ／川（縦・横・斜め・なし）／線路（あり・なし）／川と線路の上に交差点は置かない・渡れるのは橋と踏切だけ</div>
 </header>
 <main>
@@ -66,7 +66,7 @@
     <div class="path" id="pathText">-</div>
     <h2>目印</h2>
     <div class="marks" id="marks"></div>
-    <h2>ゲーム（v0.4）</h2>
+    <h2>ゲーム（v0.4・歩行は仮）</h2>
     <div class="stat" id="npcStatus"></div>
     <div class="stat" id="translatorStatus"><b>翻訳</b>一旦なし（日本語のまま解釈します）</div>
     <div class="row"><button id="exampleBtn" class="secondary">お手本の道順を入れる（確認用）</button></div>
@@ -80,6 +80,26 @@
     <div class="path" id="walkLog">-</div>
     <div class="stat" id="resultBox"></div>
     <p class="note">対応している言い回し：直進／まっすぐ、右・左（＝その方向の一番端の道。「右から2番目の道」の形も可）、「2つ目の角を右」「コンビニの角を左」、橋を渡る、踏切を渡る、振り返る、〜まで直進、止まる。</p>
+
+    <h2>フェーズ2：言語処理パイプライン</h2>
+    <div class="stat" id="pipeStatus">Translator: 初期化中…<br>Needle 2: アダプタ待機中</div>
+    <label style="display:block;margin-top:8px">道案内入力（パイプライン用）</label>
+    <textarea id="pipeInput" rows="3" style="width:100%;padding:8px;border:1px solid #dadce0;border-radius:8px;font-size:14px" placeholder="日本語の道案内を入力"></textarea>
+    <div class="row">
+      <button id="pipeRun">案内を送信</button>
+      <button class="secondary" data-test="A">テストA</button>
+      <button class="secondary" data-test="B">テストB</button>
+      <button class="secondary" data-test="C">テストC</button>
+    </div>
+    <div class="stat" id="pipeCheck"></div>
+    <h2>① 前処理（固有名詞・ランドマーク正規化後）</h2>
+    <div class="path" id="pipeNorm">-</div>
+    <h2>② 翻訳結果（英訳）</h2>
+    <div class="path" id="pipeEn">-</div>
+    <h2>③ Needle 2 生出力（ツール呼び出し）</h2>
+    <div class="path" id="pipeRaw">-</div>
+    <h2>④ 最終行動キュー（JSON）</h2>
+    <div class="path" id="pipeQueue" style="max-height:300px;overflow:auto">-</div>
   </aside>
 </main>
 <script>
@@ -320,6 +340,153 @@ function draw(info){
   document.getElementById("marks").innerHTML = landmarks.map(m=>m.icon+" "+m.name).join(" ／ ") + (station?" ／ 🚉 駅":"");
 }
 
+
+
+// ================= Phase 2 pipeline =================
+let translatorInstance=null, translatorState="init";
+const TOKEN_OF_JA = {"コンビニ":"convenience_store","カフェ":"cafe","交番":"police_box","公園":"park","神社":"shrine","薬局":"pharmacy","郵便局":"post_office","学校":"school","パン屋":"bakery","花屋":"flower_shop","駅":"station","信号":"traffic_light","橋":"bridge","踏切":"railroad","横断歩道":"crosswalk","突き当たり":"dead_end","角":"corner","交差点":"corner","赤い屋根の建物":"red_roofed_building","赤い屋根のパン屋":"bakery"};
+const ORD_EN = {1:"first",2:"second",3:"third",4:"fourth",5:"fifth"};
+const ORD_NUM = {"1":1,"１":1,"一":1,"2":2,"２":2,"二":2,"3":3,"３":3,"三":3,"4":4,"４":4,"四":4,"5":5,"５":5,"五":5,"first":1,"second":2,"third":3,"fourth":4,"fifth":5,"next":1};
+
+async function initTranslator(){
+  const st=document.getElementById("pipeStatus");
+  try{
+    if(typeof Translator!=="undefined"){
+      const av=await Translator.availability({sourceLanguage:"ja", targetLanguage:"en"});
+      if(av!=="unavailable"){ translatorInstance=await Translator.create({sourceLanguage:"ja", targetLanguage:"en"}); translatorState="api:"+av; }
+      else translatorState="unavailable";
+    } else translatorState="unavailable";
+  }catch(e){ translatorState="error:"+(e&&e.message?e.message:e); }
+  if(st) st.innerHTML="Translator: "+translatorState+(translatorInstance?"（インスタンス保持中）":"（フォールバック辞書を使用）")+"<br>Needle 2: "+(typeof window!=="undefined" && window.__needle2Runtime? "Wasm接続済み" : "アダプタ（エミュレータ）で推論");
+  return translatorState;
+}
+// Step 1a: protect/normalize landmarks & fixed expressions before translation
+function normalizeForTranslation(text){
+  let t=text;
+  t=t.replace(/([1-5１-５一二三四五])\s*つ目の(角|交差点)/g,(m,n)=>ORD_EN[ORD_NUM[n]]+" corner");
+  t=t.replace(/([1-5１-５一二三四五])\s*つ目の信号/g,(m,n)=>ORD_EN[ORD_NUM[n]]+" traffic light");
+  t=t.replace(/次の(角|交差点)/g,"next corner").replace(/次の信号/g,"next traffic light");
+  const names=[...new Set(landmarks.map(m=>m.name))];
+  for(const name of names){ if(TOKEN_OF_JA[name]) t=t.split(name).join(TOKEN_OF_JA[name].replace(/_/g," ")); }
+  t=t.replace(/突き当たり/g,"dead end").replace(/横断歩道/g,"crosswalk").replace(/踏切/g,"railroad crossing");
+  return t;
+}
+// Fallback dictionary translator (used only when the Translator API is unavailable)
+function fallbackTranslate(text){
+  const clauses=text.replace(/\n/g,"、").split(/[、。]+/).map(s=>s.trim()).filter(Boolean);
+  const out=[];
+  const tokenEn=ja=>{ for(const k of Object.keys(TOKEN_OF_JA)) if(ja.includes(k)) return TOKEN_OF_JA[k].replace(/_/g," "); return null; };
+  for(let cl of clauses){
+    if(/橋を渡った先の/.test(cl)){ out.push("cross the bridge"); cl=cl.replace(/橋を渡った先の/,""); if(!cl) continue; }
+    let m;
+    if(m=cl.match(/([1-5１-５一二三四五])\s*つ目の(信号|角|交差点)を(右|左)/)){ out.push("turn "+(m[3]==="右"?"right":"left")+" at the "+ORD_EN[ORD_NUM[m[1]]]+" "+(m[2]==="信号"?"traffic light":"corner")); continue; }
+    if(m=cl.match(/次の(信号|角|交差点)を(右|左)/)){ out.push("turn "+(m[2]==="右"?"right":"left")+" at the next "+(m[1]==="信号"?"traffic light":"corner")); continue; }
+    if(m=cl.match(/(.+?)の前で止ま/)){ const tk=tokenEn(m[1]); out.push("stop in front of the "+(tk||"landmark")); continue; }
+    if(m=cl.match(/(.+?)がゴール/)){ const tk=tokenEn(m[1]); out.push("the "+(tk||"landmark")+" is the goal"); continue; }
+    if(m=cl.match(/(.+?)で止ま/)){ const tk=tokenEn(m[1]); out.push("stop at the "+(tk||"landmark")); continue; }
+    if(/橋を渡/.test(cl)){ out.push("cross the bridge"); continue; }
+    if(/踏切を渡/.test(cl)){ out.push("cross the railroad crossing"); continue; }
+    if(/横断歩道を渡/.test(cl)){ out.push("cross the crosswalk"); continue; }
+    if(m=cl.match(/(突き当たり|角|交差点)を(右|左)/)){ out.push("turn "+(m[2]==="右"?"right":"left")+" at the "+(m[1]==="突き当たり"?"dead end":"corner")); continue; }
+    if(m=cl.match(/(.+?)を(右|左)に?曲が/)){ const tk=tokenEn(m[1]); out.push("turn "+(m[2]==="右"?"right":"left")+(tk? " at the "+tk : " at the corner")); continue; }
+    if(m=cl.match(/(右|左)に曲が/)){ out.push("turn "+(m[1]==="右"?"right":"left")); continue; }
+    if(/振り返/.test(cl)){ out.push("make a u-turn"); continue; }
+    if(/道なり/.test(cl)){ const tk=tokenEn(cl); out.push("keep going along the road"+(tk? " to the "+tk : "")); continue; }
+    if(/止ま|到着/.test(cl)){ const tk=tokenEn(cl); out.push(tk? "stop at the "+tk : "stop"); continue; }
+    if(/直進|まっすぐ|真っ直ぐ|進ん/.test(cl)){ const tk=tokenEn(cl); out.push("go straight"+(tk? " to the "+tk : "")); continue; }
+    const tk=tokenEn(cl); if(tk) out.push("go straight to the "+tk);
+  }
+  return out.join(", ");
+}
+async function translateStep(jaText){
+  const normalized=normalizeForTranslation(jaText);
+  if(translatorInstance){ try{ const en=await translatorInstance.translate(normalized); return {normalized, en, via:"Translator API"}; }catch(e){} }
+  return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書"};
+}
+// Step 2: Needle 2 adapter — real Wasm runtime if present, otherwise a deterministic emulator with the same tool-call format
+function tokenOfEn(s){
+  const table=[["convenience store","convenience_store"],["police box","police_box"],["post office","post_office"],["flower shop","flower_shop"],["traffic light","traffic_light"],["dead end","dead_end"],["red-roofed building","red_roofed_building"],["red roofed building","red_roofed_building"],["railroad crossing","railroad"],["level crossing","railroad"],["crosswalk","crosswalk"],["bridge","bridge"],["cafe","cafe"],["park","park"],["shrine","shrine"],["pharmacy","pharmacy"],["school","school"],["bakery","bakery"],["station","station"],["goal","goal"],["corner","corner"]];
+  for(const [k,v] of table) if(s.includes(k)) return v;
+  return null;
+}
+function cornerToken(s){
+  if(/second (corner|traffic)/.test(s)) return s.includes("traffic")? "second_traffic_light":"second_corner";
+  if(/third (corner|traffic)/.test(s)) return s.includes("traffic")? "third_traffic_light":"third_corner";
+  if(/first (corner|traffic)/.test(s)||/next (corner|traffic)/.test(s)) return s.includes("traffic")? "next_traffic_light":"next_corner";
+  if(s.includes("traffic light")) return "traffic_light";
+  if(s.includes("corner")) return "corner";
+  return null;
+}
+function needleEmulate(en){
+  const calls=[]; const clauses=en.toLowerCase().split(/[,.;]+/).map(s=>s.trim()).filter(Boolean);
+  for(const cl of clauses){
+    let m;
+    if(m=cl.match(/(.+?) is the goal/)){ const tk=tokenOfEn(m[1]); calls.push({tool:"arrive_stop", args:{landmark:tk||"goal"}}); continue; }
+    if(/cross/.test(cl) && /bridge/.test(cl)){ calls.push({tool:"cross", args:{obstacle:"bridge"}}); continue; }
+    if(/cross/.test(cl) && /(railroad|railway)/.test(cl)){ calls.push({tool:"cross", args:{obstacle:"railroad"}}); continue; }
+    if(/cross/.test(cl) && /crosswalk/.test(cl)){ calls.push({tool:"cross", args:{obstacle:"crosswalk"}}); continue; }
+    if(/u-turn|turn around/.test(cl)){ calls.push({tool:"turn", args:{direction:"u_turn", at:"now"}}); continue; }
+    if(m=cl.match(/turn (left|right)(?: at (?:the )?(.+))?/)){ let at="now"; if(m[2]){ at=cornerToken(m[2])||tokenOfEn(m[2])||"next_corner"; } calls.push({tool:"turn", args:{direction:m[1], at}}); continue; }
+    if(m=cl.match(/(?:stop|arrive)(?: at| in front of)? (?:the )?(.+)/)){ const tk=tokenOfEn(m[1]); calls.push({tool:"arrive_stop", args:{landmark:tk||"goal"}}); continue; }
+    if(/stop/.test(cl)){ calls.push({tool:"arrive_stop", args:{landmark:"goal"}}); continue; }
+    if(/straight|keep going|follow the road|go on/.test(cl)){ let target="next_corner"; const ct=cornerToken(cl); const tk=tokenOfEn(cl.replace(/go straight|keep going along the road|follow the road/,"")); if(ct&&/to the|until/.test(cl)) target=ct; else if(tk) target=tk; else if(ct) target=ct; calls.push({tool:"go_straight", args:{target}}); continue; }
+    const tk=tokenOfEn(cl); if(tk) calls.push({tool:"go_straight", args:{target:tk}});
+  }
+  return calls;
+}
+const Needle2 = {
+  async infer(enText){
+    if(typeof window!=="undefined" && window.__needle2Runtime && window.__needle2Run){ return await window.__needle2Run(enText); }
+    return needleEmulate(enText);
+  },
+  rawText(calls){ return calls.map(c=> c.tool+"("+Object.entries(c.args).map(([k,v])=>k+'="'+v+'"').join(", ")+")").join("\n"); }
+};
+// Step 3: post-process into the unified queue + resolve against the map graph
+function resolveTarget(token){
+  if(!token) return {nodeId:null};
+  const rel=["next_corner","second_corner","third_corner","corner","next_traffic_light","second_traffic_light","third_traffic_light","traffic_light"];
+  if(rel.includes(token)) return {nodeId:null, kind:"relative"};
+  if(token==="bridge") return {edgeIds:[...bridgeSet].map(i=>nodes[edges[i].a].id+"-"+nodes[edges[i].b].id), kind:"edge"};
+  if(token==="railroad") return {edgeIds:[...crossingSet].map(i=>nodes[edges[i].a].id+"-"+nodes[edges[i].b].id), kind:"edge"};
+  if(token==="dead_end"||token==="end"){ const de=nodes.filter(n=>n.adj.length===1).map(n=>n.id); return {nodeId:de.length?de[0]:null, candidates:de, kind:"dead_end", lost:de.length===0}; }
+  if(token==="goal") return {nodeId:goalId, kind:"goal"};
+  const jaName=Object.keys(TOKEN_OF_JA).find(k=>TOKEN_OF_JA[k]===token);
+  if(token==="station" && station) return {nodeId:station.nid, kind:"landmark"};
+  const lm=landmarks.find(m=>m.name===jaName);
+  if(lm) return {nodeId:lm.nid, kind:"landmark"};
+  return {nodeId:null, kind:"unknown", lost:true};
+}
+function postProcess(calls){
+  const q=[];
+  const pushMove=(target)=>{ const last=q[q.length-1]; if(last&&last.action==="move_until"&&last.target===target) return; const r=resolveTarget(target); q.push({action:"move_until", target, ...r}); };
+  for(const c of calls){
+    if(c.tool==="go_straight"){ pushMove(c.args.target||"next_corner"); }
+    else if(c.tool==="turn"){ const at=c.args.at||"now"; if(at!=="now") pushMove(at==="corner"?"next_corner":at); const r=at!=="now"? resolveTarget(at):{nodeId:null}; q.push({action:"turn", direction:c.args.direction, at, ...r}); }
+    else if(c.tool==="cross"){ pushMove(c.args.obstacle); q.push({action:"cross", obstacle:c.args.obstacle, ...resolveTarget(c.args.obstacle)}); }
+    else if(c.tool==="arrive_stop"){ const lm=c.args.landmark||"goal"; pushMove(lm); q.push({action:"arrive_stop", landmark:lm, ...resolveTarget(lm)}); }
+  }
+  return q;
+}
+const TEST_PATTERNS={
+  A:{text:"真っ直ぐ行って、次の角を右に曲がって、公園の前で止まって", tools:["go_straight","turn","arrive_stop"]},
+  B:{text:"2つ目の信号を左に曲がって、橋を渡った先のコンビニがゴール", tools:["turn","cross","arrive_stop"]},
+  C:{text:"突き当たりを左、そのまま道なりに進んで赤い屋根の建物", tools:["turn","go_straight"]},
+};
+async function runPipeline(){
+  const ja=document.getElementById("pipeInput").value.trim();
+  if(!ja) return null;
+  const {normalized, en, via}=await translateStep(ja);
+  document.getElementById("pipeNorm").textContent=normalized;
+  document.getElementById("pipeEn").textContent="["+via+"] "+en;
+  const calls=await Needle2.infer(en);
+  document.getElementById("pipeRaw").textContent=Needle2.rawText(calls)||"（ツール呼び出しなし）";
+  const queue=postProcess(calls);
+  document.getElementById("pipeQueue").textContent=JSON.stringify(queue,null,2);
+  return {calls, queue};
+}
+document.getElementById("pipeRun").onclick=async()=>{ document.getElementById("pipeCheck").innerHTML=""; await runPipeline(); };
+document.querySelectorAll("[data-test]").forEach(btn=>{ btn.onclick=async()=>{ const key=btn.getAttribute("data-test"); const pat=TEST_PATTERNS[key]; document.getElementById("pipeInput").value=pat.text; const res=await runPipeline(); if(res){ const got=res.calls.map(c=>c.tool); const ok=JSON.stringify(got)===JSON.stringify(pat.tools); document.getElementById("pipeCheck").innerHTML="<b>テスト"+key+"</b>"+(ok?"✅ 期待どおりのツール列":"❌ 期待 "+pat.tools.join("→")+" ／ 実際 "+got.join("→")); } }; });
+initTranslator();
 
 // ================= game logic (v0.4) =================
 let initialNeighbor=null, headingVec={x:1,y:0}, walkPos=null, submitted=false, walking=false, lastSim=null;
