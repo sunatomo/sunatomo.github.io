@@ -66,7 +66,20 @@
     <div class="path" id="pathText">-</div>
     <h2>目印</h2>
     <div class="marks" id="marks"></div>
-    <p class="note">※ 地図生成の確認専用です。道順入力・Translator API・Needle 2 連携は次ステップ。GitHub Pages へはまだ push していません。</p>
+    <h2>ゲーム（v0.4）</h2>
+    <div class="stat" id="npcStatus"></div>
+    <div class="stat" id="translatorStatus"><b>翻訳</b>一旦なし（日本語のまま解釈します）</div>
+    <div class="row"><button id="exampleBtn" class="secondary">お手本の道順を入れる（確認用）</button></div>
+    <label style="display:block">道順（1回だけ入力できます）</label>
+    <textarea id="directions" rows="4" style="width:100%;padding:8px;border:1px solid #dadce0;border-radius:8px;font-size:14px" placeholder="例：まっすぐ進んで、2つ目の交差点を右。コンビニの角を左に曲がって、橋を渡ってまっすぐ。公園の前で止まって。"></textarea>
+    <div class="row"><button id="goBtn">この道順で歩かせる</button></div>
+    <div class="stat" id="translatedBox" style="display:none"></div>
+    <h2>解釈した行動キュー（Needle 2 の代わりのルールベース）</h2>
+    <div class="path" id="cueBox">まだ入力されていません</div>
+    <h2>歩行ログ</h2>
+    <div class="path" id="walkLog">-</div>
+    <div class="stat" id="resultBox"></div>
+    <p class="note">対応している言い回し：直進／まっすぐ、右・左（＝その方向の一番端の道。「右から2番目の道」の形も可）、「2つ目の角を右」「コンビニの角を左」、橋を渡る、踏切を渡る、振り返る、〜まで直進、止まる。</p>
   </aside>
 </main>
 <script>
@@ -286,6 +299,11 @@ function draw(info){
   pin(startId,"#1a73e8","S"); pin(goalId,"#d93025","G");
   ctx.font="12px sans-serif"; ctx.fillStyle="#202124"; ctx.textAlign="center";
   ctx.fillText("スタート", nodes[startId].x, nodes[startId].y-20); ctx.fillText("ゴール", nodes[goalId].x, nodes[goalId].y-20);
+  // NPC marker + initial heading arrow
+  const npc = walkPos || nodes[startId];
+  ctx.beginPath(); ctx.moveTo(npc.x,npc.y); ctx.lineTo(npc.x+headingVec.x*26, npc.y+headingVec.y*26); ctx.lineWidth=3; ctx.strokeStyle="#e8710a"; ctx.stroke();
+  ctx.beginPath(); ctx.arc(npc.x,npc.y,10,0,7); ctx.fillStyle="#fb8c00"; ctx.fill(); ctx.lineWidth=3; ctx.strokeStyle="#fff"; ctx.stroke();
+  ctx.font="12px sans-serif"; ctx.textAlign="center"; ctx.fillText("🧍", npc.x, npc.y+4);
   const deg=nodes.map(n=>n.adj.length);
   const riverLabel= riverKinds.length? riverKinds.map(k=>({vertical:"縦",horizontal:"横",diagonal:"斜め"}[k])).join("＋") : "なし";
   const railLabel= railPath? {vertical:"縦",horizontal:"横",diagonal:"斜め"}[railKind] : "なし";
@@ -302,8 +320,189 @@ function draw(info){
   document.getElementById("marks").innerHTML = landmarks.map(m=>m.icon+" "+m.name).join(" ／ ") + (station?" ／ 🚉 駅":"");
 }
 
+
+// ================= game logic (v0.4) =================
+let initialNeighbor=null, headingVec={x:1,y:0}, walkPos=null, submitted=false, walking=false, lastSim=null;
+const LANDMARKS_EN={ "コンビニ":"convenience store", "カフェ":"cafe", "交番":"police box", "公園":"park", "神社":"shrine", "薬局":"pharmacy", "郵便局":"post office", "学校":"school", "パン屋":"bakery", "花屋":"flower shop", "駅":"station" };
+function compass(v){ const names=["東","北東","北","北西","西","南西","南","南東"]; const ang=Math.atan2(-v.y, v.x); let i=Math.round(ang/(Math.PI/4)); i=((i%8)+8)%8; return names[i]; }
+function setupGame(){
+  const sNode=nodes[startId];
+  if(sNode && sNode.adj.length){ initialNeighbor = sNode.adj[Math.floor(rand()*sNode.adj.length)].to; const t=nodes[initialNeighbor]; headingVec={x:t.x-sNode.x, y:t.y-sNode.y}; const L=Math.hypot(headingVec.x,headingVec.y)||1; headingVec={x:headingVec.x/L, y:headingVec.y/L}; }
+  walkPos = sNode? {x:sNode.x, y:sNode.y} : null; submitted=false; walking=false; lastSim=null;
+  const ns=document.getElementById("npcStatus"); if(ns) ns.innerHTML="<b>NPC</b>スタート地点で <b>"+compass(headingVec)+"向き</b> に立っています";
+  const rb=document.getElementById("resultBox"); if(rb) rb.innerHTML="";
+  const cb=document.getElementById("cueBox"); if(cb) cb.textContent="まだ入力されていません";
+  const wl=document.getElementById("walkLog"); if(wl) wl.textContent="-";
+  const ta=document.getElementById("directions"); if(ta){ ta.disabled=false; }
+  const gb=document.getElementById("goBtn"); if(gb){ gb.disabled=false; }
+}
+function signedAngle(h,d){ return Math.atan2(h.x*d.y-h.y*d.x, h.x*d.x+h.y*d.y); } // y-down: positive = right (clockwise)
+function parseDirections(text){
+  const clauses = text.replace(/\n/g,"、").split(/[、。,.；;]+/).map(s=>s.trim()).filter(Boolean);
+  const cues=[];
+  const ordMap={"1":1,"一":1,"first":1,"１":1,"2":2,"二":2,"second":2,"２":2,"3":3,"三":3,"third":3,"３":3,"4":4,"四":4,"fourth":4,"４":4,"5":5,"五":5,"fifth":5,"５":5};
+  for(const cl of clauses){
+    const low=cl.toLowerCase();
+    let landmark=null;
+    for(const name of Object.keys(LANDMARKS_EN)){ if(cl.includes(name) || low.includes(LANDMARKS_EN[name])) { landmark=name; break; } }
+    if(!landmark && (cl.includes("駅")||low.includes("station"))) landmark="駅";
+    let ord=null; const om=low.match(/(first|second|third|fourth|fifth|[1-5１-５一二三四五])\s*(つ目|番目|th|st|nd|rd)?/);
+    if(om && (cl.includes("目")||cl.includes("番")||/first|second|third|fourth|fifth/.test(low))) ord=ordMap[om[1]];
+    const rankR=low.match(/右から\s*([1-5１-５一二三四五])\s*番目/), rankL=low.match(/左から\s*([1-5１-５一二三四五])\s*番目/);
+    if(rankR||rankL){ const nm={"1":1,"１":1,"一":1,"2":2,"２":2,"二":2,"3":3,"３":3,"三":3,"4":4,"４":4,"四":4,"5":5,"５":5,"五":5}; cues.push({type:"rank", side:rankR?"right":"left", rank:nm[(rankR||rankL)[1]]}); continue; }
+    const isRight=/右|right/.test(low), isLeft=/左|left/.test(low);
+    const isBridge=/橋|bridge/.test(low), isCross=/踏切|railway crossing|level crossing/.test(low);
+    const isUturn=/振り返|後ろに戻|u-?turn|turn around/.test(low);
+    const isStop=/止ま|到着|着い|stop|arrive/.test(low) && !isRight && !isLeft;
+    const isStraight=/直進|まっすぐ|直行|straight|forward/.test(low);
+    if(isUturn){ cues.push({type:"uturn"}); continue; }
+    if(isBridge){ cues.push({type:"bridge"}); if(isRight||isLeft) cues.push({type:isRight?"right":"left", landmark, ord}); continue; }
+    if(isCross){ cues.push({type:"crossing"}); if(isRight||isLeft) cues.push({type:isRight?"right":"left", landmark, ord}); continue; }
+    if(isRight||isLeft){ cues.push({type:isRight?"right":"left", landmark, ord}); continue; }
+    if(isStop){ cues.push({type:"stop"}); continue; }
+    if(isStraight){ cues.push(landmark? {type:"straightTo", landmark} : {type:"straight"}); continue; }
+    if(landmark){ cues.push({type:"straightTo", landmark}); continue; }
+  }
+  return cues;
+}
+function cueLabel(c){
+  if(c.type==="straight") return "直進（1ブロック）";
+  if(c.type==="straightTo") return (c.landmark||"目印")+"まで直進";
+  if(c.type==="right"||c.type==="left"){ let s=c.type==="right"?"右折":"左折"; if(c.ord) s=c.ord+"つ目の角で"+s; if(c.landmark) s=c.landmark+"の角で"+s; return s; }
+  if(c.type==="rank") return (c.side==="right"?"右":"左")+"から"+c.rank+"番目の道に入る";
+  if(c.type==="bridge") return "橋を渡るまで直進";
+  if(c.type==="crossing") return "踏切を渡るまで直進";
+  if(c.type==="uturn") return "振り返る";
+  if(c.type==="stop") return "停止";
+  return c.type;
+}
+function simulate(cues){
+  const log=[]; let cur=startId, prev=null, heading={...headingVec}; const pathNodes=[cur];
+  let moves=0; const MAX=48;
+  function edgeDir(from,to){ const A=nodes[from],B=nodes[to]; const dx=B.x-A.x, dy=B.y-A.y; const L=Math.hypot(dx,dy)||1; return {x:dx/L,y:dy/L}; }
+  function candidates(){ return nodes[cur].adj.filter(ad=>ad.to!==prev); }
+  function moveTo(to, why){ const e=nodes[cur].adj.find(ad=>ad.to===to); heading=edgeDir(cur,to); prev=cur; cur=to; pathNodes.push(cur); moves++; log.push(why+" → ノード"+cur+(e&&e.e.bridge?"（橋を渡った）":"")+(e&&e.e.crossing?"（踏切を渡った）":"")); return e; }
+  function stepStraight(){ const cs=candidates(); if(!cs.length) return false; let best=null,bd=-2; for(const ad of cs){ const d=edgeDir(cur,ad.to); const dot=d.x*heading.x+d.y*heading.y; if(dot>bd){ bd=dot; best=ad.to; } } moveTo(best,"直進"); return true; }
+  function exitsByAngle(){ return candidates().map(ad=>({to:ad.to, a:signedAngle(heading, edgeDir(cur,ad.to))})).sort((x,y)=>x.a-y.a); }
+  function stepTurn(side){ const ex=exitsByAngle().filter(e=> side==="right"? e.a>0.05 : e.a<-0.05); if(!ex.length) return false; const chosen = side==="right"? ex[ex.length-1] : ex[0]; moveTo(chosen.to, side==="right"?"一番右の道へ":"一番左の道へ"); return true; }
+  function stepRank(side, rank){ const ex=exitsByAngle(); const ordered = side==="right"? [...ex].reverse() : ex; const chosen=ordered[rank-1]; if(!chosen) return false; moveTo(chosen.to, (side==="right"?"右":"左")+"から"+rank+"番目の道へ"); return true; }
+  function stepUturn(){ if(prev!==null){ moveTo(prev,"振り返る"); return true; } let best=null,bd=2; for(const ad of nodes[cur].adj){ const d=edgeDir(cur,ad.to); const dot=d.x*heading.x+d.y*heading.y; if(dot<bd){ bd=dot; best=ad.to; } } if(best===null) return false; moveTo(best,"振り返る"); return true; }
+  function nodeLandmark(nid){ const m=landmarks.find(m=>m.nid===nid); if(m) return m.name; if(station&&station.nid===nid) return "駅"; return null; }
+  let fail=null;
+  for(const cue of cues){
+    if(moves>MAX){ fail="歩きすぎて力尽きた"; break; }
+    if(cur===goalId) break;
+    if(cue.type==="stop") break;
+    else if(cue.type==="straight"){ if(!stepStraight()){ fail="行き止まりで進めなかった"; break; } }
+    else if(cue.type==="uturn"){ if(!stepUturn()){ fail="振り返れなかった"; break; } }
+    else if(cue.type==="rank"){ if(!stepRank(cue.side, cue.rank)){ fail="その道がなかった"; break; } }
+    else if(cue.type==="right"||cue.type==="left"){
+      if(cue.landmark){ let guard=0; while(nodeLandmark(cur)!==cue.landmark && guard<14){ if(!stepStraight()){ fail="行き止まりで進めなかった"; break; } guard++; if(cur===goalId) break; } if(fail) break; if(nodeLandmark(cur)!==cue.landmark){ fail=cue.landmark+"にたどり着けなかった"; break; } }
+      else if(cue.ord && cue.ord>1){ for(let k=1;k<cue.ord;k++){ if(!stepStraight()){ fail="行き止まりで進めなかった"; break; } if(cur===goalId) break; } if(fail) break; }
+      if(cur!==goalId && !stepTurn(cue.type)){ fail=(cue.type==="right"?"右":"左")+"に曲がる道がなかった"; break; }
+    }
+    else if(cue.type==="straightTo"){ let guard=0; while(nodeLandmark(cur)!==cue.landmark && guard<16){ if(!stepStraight()){ fail="行き止まりで進めなかった"; break; } guard++; if(cur===goalId) break; } if(!fail && nodeLandmark(cur)!==cue.landmark && cur!==goalId){ fail=cue.landmark+"にたどり着けなかった"; break; } }
+    else if(cue.type==="bridge"||cue.type==="crossing"){ const flag=cue.type==="bridge"?"bridge":"crossing"; let crossed=false, guard=0; while(!crossed && guard<14){ const before=cur; if(!stepStraight()){ fail="行き止まりで進めなかった"; break; } const e=nodes[prev].adj.find(ad=>ad.to===cur); if(e&&e.e[flag]) crossed=true; guard++; if(cur===goalId) break; } if(!fail && !crossed && cur!==goalId){ fail=(cue.type==="bridge"?"橋":"踏切")+"にたどり着けなかった"; break; } }
+    if(cur===goalId) break;
+  }
+  const success = cur===goalId;
+  return {success, fail, cur, pathNodes, log};
+}
+function exampleDirections(){
+  // classify each step by which exit the correct road is: straightest / rightmost / leftmost / ranked
+  let heading={...headingVec}; let cur=startId, prev=null; const clauses=[];
+  function dirOf(a,b){ const A=nodes[a],B=nodes[b]; const dx=B.x-A.x, dy=B.y-A.y; const L=Math.hypot(dx,dy)||1; return {x:dx/L,y:dy/L}; }
+  for(let i=1;i<bestPath.length;i++){
+    const nxt=bestPath[i]; const d=dirOf(cur,nxt); const aBest=signedAngle(heading,d);
+    const exits=nodes[cur].adj.filter(ad=>ad.to!==prev).map(ad=>({to:ad.to, a:signedAngle(heading, dirOf(cur,ad.to))}));
+    const straightest=[...exits].sort((x,y)=>Math.abs(x.a)-Math.abs(y.a))[0];
+    if(Math.abs(Math.abs(aBest)-Math.PI)<0.45) clauses.push("振り返って進んで");
+    else if(straightest && straightest.to===nxt) clauses.push("まっすぐ進んで");
+    else {
+      const desc=[...exits].sort((x,y)=>y.a-x.a); const asc=[...exits].sort((x,y)=>x.a-y.a);
+      const rankR=desc.findIndex(e=>e.to===nxt)+1, rankL=asc.findIndex(e=>e.to===nxt)+1;
+      if(aBest>0){ clauses.push(rankR===1? "右に曲がって" : "右から"+rankR+"番目の道に入って"); }
+      else { clauses.push(rankL===1? "左に曲がって" : "左から"+rankL+"番目の道に入って"); }
+    }
+    heading=d; prev=cur; cur=nxt;
+  }
+  clauses.push("止まって");
+  return clauses.join("、")+"。";
+}
+// ---- Translator API (Chrome built-in) ----
+async function probeTranslator(){
+  const el=document.getElementById("translatorStatus");
+  const set=t=>{ if(el) el.innerHTML="<b>Translator API</b>"+t; };
+  try{
+    if(typeof Translator!=="undefined"){
+      const av=await Translator.availability({sourceLanguage:"ja", targetLanguage:"en"});
+      set("利用可能ステータス: "+av+"（window.Translator）"); return av;
+    }
+    if(typeof self!=="undefined" && self.translation && self.translation.createTranslator){
+      const av=await self.translation.canTranslate({sourceLanguage:"ja", targetLanguage:"en"});
+      set("利用可能ステータス: "+av+"（self.translation・旧API）"); return av;
+    }
+    set("このブラウザでは未対応（Translator が見つからない）"); return "unavailable";
+  }catch(e){ set("確認エラー: "+(e&&e.message?e.message:e)); return "error"; }
+}
+async function translateJaEn(text){
+  try{
+    if(typeof Translator!=="undefined"){
+      const av=await Translator.availability({sourceLanguage:"ja", targetLanguage:"en"});
+      if(av==="unavailable") return null;
+      const tr=await Translator.create({sourceLanguage:"ja", targetLanguage:"en"});
+      return await tr.translate(text);
+    }
+    if(typeof self!=="undefined" && self.translation && self.translation.createTranslator){
+      const tr=await self.translation.createTranslator({sourceLanguage:"ja", targetLanguage:"en"});
+      return await tr.translate(text);
+    }
+  }catch(e){ return null; }
+  return null;
+}
+async function runGame(){
+  if(submitted || walking) return;
+  const ta=document.getElementById("directions"); const text=(ta.value||"").trim();
+  if(!text){ document.getElementById("resultBox").innerHTML="<b>結果</b>道順が空です"; return; }
+  submitted=true; ta.disabled=true; document.getElementById("goBtn").disabled=true;
+  const cues=parseDirections(text);
+  document.getElementById("cueBox").textContent = cues.length? cues.map((c,i)=>(i+1)+". "+cueLabel(c)).join("\n") : "行動キューを読み取れませんでした";
+  const sim=simulate(cues); lastSim=sim;
+  document.getElementById("walkLog").textContent = sim.log.length? sim.log.join("\n") : "（移動なし）";
+  animateWalk(sim);
+}
+function animateWalk(sim){
+  walking=true;
+  const pts=sim.pathNodes.map(nid=>({x:nodes[nid].x, y:nodes[nid].y}));
+  if(pts.length<2){ finishWalk(sim); return; }
+  let seg=0, t0=null; const SEG_MS=420;
+  function frame(ts){
+    if(t0===null) t0=ts;
+    const t=Math.min(1,(ts-t0)/SEG_MS);
+    const A=pts[seg], B=pts[seg+1];
+    walkPos={x:A.x+(B.x-A.x)*t, y:A.y+(B.y-A.y)*t};
+    draw(lastInfo);
+    if(t>=1){ seg++; t0=null; if(seg>=pts.length-1){ finishWalk(sim); return; } }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+function finishWalk(sim){
+  walking=false; const g=nodes[goalId];
+  const d=Math.round(Math.hypot(nodes[sim.cur].x-g.x, nodes[sim.cur].y-g.y));
+  document.getElementById("resultBox").innerHTML = sim.success
+    ? "<b>結果</b>🎉 クリア！ ゴールに到着しました"
+    : "<b>結果</b>失敗… "+(sim.fail||"道順が尽きた")+"（ゴールまで直線 約"+d+"px）";
+  draw(lastInfo);
+}
+document.getElementById("goBtn").onclick=runGame;
+document.getElementById("probeBtn").onclick=()=>probeTranslator();
+document.getElementById("exampleBtn").onclick=()=>{ document.getElementById("directions").value=exampleDirections(); };
+probeTranslator();
+
+let lastInfo=null;
 let currentSeed=20261126;
-function render(){ const info=generate(currentSeed, document.getElementById("riverSel").value, document.getElementById("railSel").value); draw(info); }
+function render(){ const info=generate(currentSeed, document.getElementById("riverSel").value, document.getElementById("railSel").value); lastInfo=info; setupGame(); draw(info); }
 document.getElementById("regen").onclick=()=>{ currentSeed=parseInt(document.getElementById("seed").value||"1",10); render(); };
 document.getElementById("next").onclick=()=>{ currentSeed++; document.getElementById("seed").value=currentSeed; render(); };
 document.getElementById("riverSel").onchange=render;
