@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一発指示・道案内パズル — 地図生成プロトタイプ v0.2</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Hiragino Sans", sans-serif; background:#f1f3f4; color:#202124; }
+  header { padding:14px 18px 8px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:#5f6368; font-size:13px; }
+  main { display:flex; gap:14px; padding:10px 18px 18px; align-items:flex-start; flex-wrap:wrap; }
+  .mapwrap { background:#fff; border:1px solid #dadce0; border-radius:12px; padding:10px; }
+  canvas { display:block; width:960px; max-width:92vw; height:auto; background:#eef3e6; border-radius:8px; }
+  .panel { background:#fff; border:1px solid #dadce0; border-radius:12px; padding:14px; width:330px; max-width:92vw; }
+  .panel h2 { font-size:15px; margin:10px 0 8px; }
+  .panel h2:first-child { margin-top:0; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; align-items:center; }
+  button { border:1px solid #dadce0; background:#1a73e8; color:#fff; border-radius:999px; padding:8px 14px; font-size:14px; cursor:pointer; }
+  button.secondary { background:#fff; color:#1a73e8; }
+  label { font-size:13px; display:flex; align-items:center; gap:6px; }
+  select, input[type=number] { padding:7px 8px; border:1px solid #dadce0; border-radius:8px; font-size:14px; background:#fff; }
+  input[type=number] { width:110px; }
+  .stat { font-size:13px; line-height:1.9; border-top:1px solid #eee; padding-top:8px; }
+  .stat b { display:inline-block; min-width:118px; color:#3c4043; }
+  .path { font-size:13px; line-height:1.7; background:#f8f9fa; border-radius:8px; padding:8px 10px; white-space:pre-wrap; }
+  .marks { font-size:13px; line-height:1.8; }
+  .note { font-size:12px; color:#5f6368; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <h1>一発指示・道案内パズル <span style="font-size:13px;color:#5f6368">地図生成プロトタイプ v0.2（ローカル確認用）</span></h1>
+  <div class="sub">密な市街地と疎な郊外が混在する非格子グラフ／川（縦・横・斜め・なし）／線路（あり・なし）／川と線路の上に交差点は置かない・渡れるのは橋と踏切だけ</div>
+</header>
+<main>
+  <div class="mapwrap"><canvas id="map" width="960" height="720"></canvas></div>
+  <aside class="panel">
+    <h2>生成コントロール</h2>
+    <label>シード <input type="number" id="seed" value="20261126"></label>
+    <div class="row">
+      <label>川
+        <select id="riverSel">
+          <option value="auto">おまかせ（0〜2本）</option><option value="0">0本</option>
+          <option value="1">1本</option><option value="2">2本</option>
+        </select>
+      </label>
+      <label>線路
+        <select id="railSel">
+          <option value="auto">おまかせ</option><option value="on">あり</option><option value="none">なし</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <button id="regen">↻ 再生成</button>
+      <button id="next" class="secondary">次のシード</button>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="showPath"> 正解ルート表示</label>
+      <label><input type="checkbox" id="showGraph"> グラフ（ノードID）表示</label>
+    </div>
+    <h2>生成結果</h2>
+    <div class="stat" id="stats"></div>
+    <h2>最短ルート（確認用）</h2>
+    <div class="path" id="pathText">-</div>
+    <h2>目印</h2>
+    <div class="marks" id="marks"></div>
+    <p class="note">※ 地図生成の確認専用です。道順入力・Translator API・Needle 2 連携は次ステップ。GitHub Pages へはまだ push していません。</p>
+  </aside>
+</main>
+<script>
+"use strict";
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+let rand = mulberry32(1);
+const R=(a,b)=>a+rand()*(b-a);
+const RI=(a,b)=>Math.floor(R(a,b+1));
+const pick=arr=>arr[Math.floor(rand()*arr.length)];
+const W=960, H=720, MARGIN=28;
+let nodes=[], edges=[], landmarks=[], startId=null, goalId=null, bestPath=[];
+let riverPaths=[], riverKinds=[], riverBridgeCaps=[], railPath=null, railKind="none", hotspots=[], bridgeSet=new Set(), crossingSet=new Set(), station=null, exits=[];
+
+// ---- geometry ----
+function segInt(p1,p2,p3,p4){ const d=(p2.x-p1.x)*(p4.y-p3.y)-(p2.y-p1.y)*(p4.x-p3.x); if(Math.abs(d)<1e-9) return false; const t=((p3.x-p1.x)*(p4.y-p3.y)-(p3.y-p1.y)*(p4.x-p3.x))/d; const u=((p3.x-p1.x)*(p2.y-p1.y)-(p3.y-p1.y)*(p2.x-p1.x))/d; return t>0.001&&t<0.999&&u>0.001&&u<0.999; }
+function edgesCross(a,b,c,d){ return segInt(a,b,c,d); }
+function segPolylineCross(a,b,path){ if(!path) return false; for(let i=0;i<path.length-1;i++) if(segInt(a,b,path[i],path[i+1])) return true; return false; }
+function distPtSeg(p,a,b){ const dx=b.x-a.x, dy=b.y-a.y; const L=dx*dx+dy*dy||1; let t=((p.x-a.x)*dx+(p.y-a.y)*dy)/L; t=Math.max(0,Math.min(1,t)); return Math.hypot(p.x-(a.x+t*dx), p.y-(a.y+t*dy)); }
+function distToPath(p,path){ if(!path) return 1e9; let m=1e9; for(let i=0;i<path.length-1;i++) m=Math.min(m,distPtSeg(p,path[i],path[i+1])); return m; }
+function distToRivers(p){ let m=1e9; for(const pth of riverPaths) m=Math.min(m,distToPath(p,pth)); return m; }
+function crossedRivers(a,b){ const out=[]; riverPaths.forEach((pth,i)=>{ if(segPolylineCross(a,b,pth)) out.push(i); }); return out; }
+function minPathDist(p1,p2){ let m=1e9; for(const pt of p2) m=Math.min(m,distToPath(pt,p1)); return m; }
+
+// ---- terrain paths ----
+function makeRiver(kind){
+  const pts=[]; const base=R(0.32,0.68), amp=R(22,48), ph=R(0,6.28);
+  for(let i=0;i<=40;i++){ const t=i/40;
+    if(kind==="vertical") pts.push({x: W*base + Math.sin(t*5.2+ph)*amp + Math.sin(t*11+ph)*8, y: -30 + t*(H+60)});
+    else if(kind==="horizontal") pts.push({x: -30 + t*(W+60), y: H*base + Math.sin(t*5.2+ph)*amp + Math.sin(t*11+ph)*8});
+    else if(kind==="diagonal"){ const x=-30+t*(W+60); pts.push({x, y: H*(base-0.35) + t*H*0.7 + Math.sin(t*5+ph)*amp*0.7}); }
+  }
+  return pts;
+}
+function makeRail(){
+  const pts=[]; const kind=pick(["horizontal","diagonal","vertical"]); const base=R(0.25,0.75), amp=R(4,12), ph=R(0,6.28);
+  for(let i=0;i<=40;i++){ const t=i/40;
+    if(kind==="horizontal") pts.push({x:-30+t*(W+60), y:H*base+Math.sin(t*3.4+ph)*amp});
+    else if(kind==="vertical") pts.push({x:W*base+Math.sin(t*3.4+ph)*amp, y:-30+t*(H+60)});
+    else { const x=-30+t*(W+60); pts.push({x, y:H*(base-0.3)+t*H*0.6+Math.sin(t*3+ph)*amp}); }
+  }
+  return {path:pts, kind};
+}
+
+function densityAt(x,y){ let d=0.14; for(const hs of hotspots) d=Math.max(d, Math.exp(-(((x-hs.x)**2)+((y-hs.y)**2))/(2*hs.s*hs.s))); return Math.min(1,d); }
+
+function generate(seed, riverOpt, railOpt){
+  rand = mulberry32(seed);
+  nodes=[]; edges=[]; landmarks=[]; bridgeSet=new Set(); crossingSet=new Set(); station=null; exits=[];
+  // river patterns: 0, 1 or 2 rivers, each with its own orientation
+  const riverCount = riverOpt!=="auto" ? parseInt(riverOpt,10) : RI(0,2);
+  riverPaths=[]; riverKinds=[]; riverBridgeCaps=[];
+  for(let i=0;i<riverCount;i++){
+    let best=null;
+    for(let tries=0;tries<40;tries++){
+      const kind=pick(["vertical","horizontal","diagonal"]); const path=makeRiver(kind);
+      const d=riverPaths.length? Math.min(...riverPaths.map(pth=>minPathDist(pth,path))) : 1e9;
+      if(!best || d>best.d) best={kind,path,d};
+      if(d>90) break;
+    }
+    if(best && (i===0 || best.d>62)){ riverPaths.push(best.path); riverKinds.push(best.kind); riverBridgeCaps.push(RI(2,3)); }
+  }
+  let wantRail = railOpt!=="auto" ? (railOpt==="on") : rand()<0.65;
+  railPath=null; railKind="none";
+  if(wantRail){ const r=makeRail(); railPath=r.path; railKind=r.kind; }
+  // density hotspots: 2-4 dense districts
+  hotspots=[]; const nh=RI(2,4);
+  for(let i=0;i<nh;i++) hotspots.push({x:R(120,W-120), y:R(110,H-110), s:R(105,200)});
+  // node sampling by density (dense downtown + sparse outskirts mixed)
+  const target=RI(88,118); let attempts=0;
+  while(nodes.length<target && attempts<6000){ attempts++;
+    let x,y;
+    if(rand()<0.62){ const hs=pick(hotspots); const a=R(0,Math.PI*2), rr=Math.abs(R(0,1)+R(0,1)-1)*hs.s*1.55; x=hs.x+Math.cos(a)*rr; y=hs.y+Math.sin(a)*rr*0.82; }
+    else { x=R(MARGIN,W-MARGIN); y=R(MARGIN,H-MARGIN); }
+    if(x<MARGIN||x>W-MARGIN||y<MARGIN||y>H-MARGIN) continue;
+    const p={x,y};
+    if(distToRivers(p)<40) continue;                 // no intersections on a river
+    if(distToPath(p,railPath)<22) continue;           // no intersections on the tracks
+    const d=densityAt(x,y); const minDist=80-46*d;    // dense: ~34px, sparse: ~80px
+    let ok=true; for(const n of nodes){ if(Math.hypot(n.x-x,n.y-y)<minDist){ ok=false; break; } }
+    if(ok) nodes.push({id:nodes.length, x, y, adj:[]});
+  }
+  nodes.forEach((n,i)=>n.id=i);
+  // candidate pairs, local length limit depends on density
+  const pairs=[];
+  for(let i=0;i<nodes.length;i++) for(let j=i+1;j<nodes.length;j++){
+    const a=nodes[i], b=nodes[j]; const len=Math.hypot(a.x-b.x,a.y-b.y);
+    const dAvg=(densityAt(a.x,a.y)+densityAt(b.x,b.y))/2; const maxLen=128+105*(1-dAvg);
+    if(len<maxLen) pairs.push({a:i,b:j,len});
+  }
+  pairs.sort((p,q)=>p.len-q.len);
+  const edgeKey=(a,b)=>a<b?a+"-"+b:b+"-"+a; const edgeMap=new Map();
+  const maxCross = railPath? RI(2,4) : 0;
+  const bridgesPerRiver = riverPaths.map(()=>0);
+  let crossUsed=0;
+  function tryAdd(p, ignoreDegree){
+    const k=edgeKey(p.a,p.b); if(edgeMap.has(k)) return false;
+    const A=nodes[p.a], B=nodes[p.b];
+    if(!ignoreDegree && (A.adj.length>=5 || B.adj.length>=5)) return false;
+    for(const e of edges){ if(e.a===p.a||e.a===p.b||e.b===p.a||e.b===p.b) continue; if(edgesCross(A,B,nodes[e.a],nodes[e.b])) return false; } // no mid-road intersections
+    const crossRiv = crossedRivers(A,B); const isBridge = crossRiv.length>0; const isCross = segPolylineCross(A,B,railPath);
+    if(crossRiv.some(i=>bridgesPerRiver[i]>=riverBridgeCaps[i])) return false;
+    if(isCross && crossUsed>=maxCross) return false;
+    // keep angles at nodes from getting too sharp
+    if(!ignoreDegree){ for(const end of [p.a,p.b]){ const O=nodes[end]; for(const ad of O.adj){ const P=nodes[ad.to]; const v1={x:(end===p.a?B.x:A.x)-O.x, y:(end===p.a?B.y:A.y)-O.y}; const v2={x:P.x-O.x, y:P.y-O.y}; const cos=(v1.x*v2.x+v1.y*v2.y)/((Math.hypot(v1.x,v1.y)*Math.hypot(v2.x,v2.y))||1); if(cos>0.90) return false; } } }
+    const e={a:p.a,b:p.b,type:"local",bridge:isBridge,crossing:isCross};
+    edges.push(e); edgeMap.set(k,e);
+    A.adj.push({to:p.b,e}); B.adj.push({to:p.a,e});
+    if(isBridge){ bridgeSet.add(edges.length-1); crossRiv.forEach(i=>bridgesPerRiver[i]++); }
+    if(isCross){ crossingSet.add(edges.length-1); crossUsed++; }
+    return true;
+  }
+  // 1) Kruskal spanning tree first (connectivity)
+  const parent=nodes.map((_,i)=>i); const find=x=>parent[x]===x?x:(parent[x]=find(parent[x]));
+  for(const p of pairs){ const ra=find(p.a), rb=find(p.b); if(ra!==rb){ if(tryAdd(p,true)){ parent[ra]=rb; } } }
+  // keep largest component only, drop strays
+  const comp=new Map(); nodes.forEach(n=>{ const r=find(n.id); if(!comp.has(r)) comp.set(r,[]); comp.get(r).push(n.id); });
+  let biggest=[]; for(const v of comp.values()) if(v.length>biggest.length) biggest=v;
+  if(biggest.length<nodes.length){
+    const keep=new Set(biggest); const remap=new Map(); const nn=[];
+    nodes.forEach(n=>{ if(keep.has(n.id)){ remap.set(n.id,nn.length); nn.push({...n, id:nn.length, adj:[]}); } });
+    const ne=[]; bridgeSet=new Set(); crossingSet=new Set();
+    edges.forEach(e=>{ if(keep.has(e.a)&&keep.has(e.b)){ const ne2={...e, a:remap.get(e.a), b:remap.get(e.b)}; if(ne2.bridge) bridgeSet.add(ne.length); if(ne2.crossing) crossingSet.add(ne.length); ne.push(ne2); } });
+    nodes=nn; edges=ne; nodes.forEach(n=>n.adj=[]); edges.forEach(e=>{ nodes[e.a].adj.push({to:e.b,e}); nodes[e.b].adj.push({to:e.a,e}); });
+  }
+  // 2) extra loops: denser in downtown, sparse outside
+  for(const p of pairs){ const dAvg=(densityAt(nodes[p.a].x,nodes[p.a].y)+densityAt(nodes[p.b].x,nodes[p.b].y))/2; if(rand()<0.18+0.5*dAvg) tryAdd(p,false); }
+  // 3) arterials: long BFS paths across the graph, marked wide
+  function bfsPath(s,g){ const prev=new Map([[s,null]]); const q=[s]; while(q.length){ const cur=q.shift(); if(cur===g) break; for(const {to} of nodes[cur].adj) if(!prev.has(to)){ prev.set(to,cur); q.push(to); } } if(!prev.has(g)) return null; const path=[]; let c=g; while(c!==null){ path.unshift(c); c=prev.get(c); } return path; }
+  function markArterial(path){ if(!path) return; for(let i=0;i<path.length-1;i++){ const k=edgeKey(path[i],path[i+1]); const e=edgeMap.get(k); if(e) e.type="arterial"; } }
+  // rebuild edgeMap after possible remap
+  edgeMap.clear(); edges.forEach(e=>edgeMap.set(edgeKey(e.a,e.b),e));
+  const byX=[...nodes].sort((a,b)=>a.x-b.x), byY=[...nodes].sort((a,b)=>a.y-b.y);
+  markArterial(bfsPath(byX[2].id, byX[byX.length-3].id));
+  markArterial(bfsPath(byY[1].id, byY[byY.length-2].id));
+  if(rand()<0.6) markArterial(bfsPath(byX[0].id, byY[byY.length-1].id));
+  // 4) start / goal: 3-5 turns on shortest path
+  function bfs(s){ const dist=new Map([[s,0]]), prev=new Map(); const q=[s]; while(q.length){ const cur=q.shift(); for(const {to} of nodes[cur].adj) if(!dist.has(to)){ dist.set(to,dist.get(cur)+1); prev.set(to,cur); q.push(to); } } return {dist,prev}; }
+  function pathOf(prev,s,g){ const p=[]; let cur=g; while(cur!==undefined){ p.unshift(cur); if(cur===s) break; cur=prev.get(cur); } return p; }
+  function turnsOf(p){ let t=0; for(let i=1;i<p.length-1;i++){ const A=nodes[p[i-1]],B=nodes[p[i]],C=nodes[p[i+1]]; const v1=[B.x-A.x,B.y-A.y], v2=[C.x-B.x,C.y-B.y]; const ang=Math.abs(Math.atan2(v1[0]*v2[1]-v1[1]*v2[0], v1[0]*v2[0]+v1[1]*v2[1])); if(ang>0.5) t++; } return t; }
+  const cand=[];
+  for(const s of nodes){ const {dist,prev}=bfs(s.id); for(const g of nodes){ if(g.id===s.id) continue; const d=dist.get(g.id); if(!d||d<5||d>10) continue; const p=pathOf(prev,s.id,g.id); const t=turnsOf(p); if(t>=3&&t<=5 && Math.hypot(nodes[g.id].x-s.x, nodes[g.id].y-s.y)>330) cand.push({s:s.id,g:g.id,p,t,d}); } }
+  const chosen = cand.length? pick(cand) : {s:0,g:nodes.length-1,p:[0,nodes.length-1],t:0,d:1};
+  startId=chosen.s; goalId=chosen.g; bestPath=chosen.p;
+  // 5) station near the rail line (not on it)
+  if(railPath){ let best=null,bd=1e9; for(const n of nodes){ if(n.id===startId||n.id===goalId) continue; const d=distToPath(n,railPath); if(d>26&&d<95&&d<bd){ bd=d; best=n; } } if(best) station={nid:best.id, x:best.x, y:best.y}; }
+  // 6) landmarks on node corners, offset must stay off river/rail
+  const types=[["🏪","コンビニ"],["☕","カフェ"],["👮","交番"],["🌳","公園"],["⛩️","神社"],["💊","薬局"],["📮","郵便局"],["🏫","学校"],["🥐","パン屋"],["💐","花屋"]];
+  const used=new Set([startId,goalId]); if(station) used.add(station.nid);
+  const pool=[]; bestPath.slice(1,-1).forEach(nid=>{ if(rand()<0.75) pool.push(nid); });
+  const shuffled=[...nodes].sort(()=>rand()-0.5);
+  for(const n of shuffled){ if(pool.length>=10) break; if(!used.has(n.id)&&!pool.includes(n.id)&&n.adj.length>=2) pool.push(n.id); }
+  pool.slice(0,10).forEach((nid,i)=>{ const [icon,name]=types[i%types.length]; const n=nodes[nid];
+    for(let k=0;k<8;k++){ const ang=R(0,Math.PI*2); const lx=n.x+Math.cos(ang)*30, ly=n.y+Math.sin(ang)*25; const lp={x:lx,y:ly}; if(distToRivers(lp)>34 && distToPath(lp,railPath)>18){ landmarks.push({nid,icon,name,x:lx,y:ly}); break; } }
+    used.add(nid); });
+  // 7) exit roads: extend boundary roads to the frame edge (visual only, not graph nodes)
+  exits=[];
+  const sides=[
+    {name:"top",    sort:(a,b)=>a.y-b.y, point:n=>({x:n.x, y:0}),   along:n=>n.x},
+    {name:"bottom", sort:(a,b)=>b.y-a.y, point:n=>({x:n.x, y:H}),   along:n=>n.x},
+    {name:"left",   sort:(a,b)=>a.x-b.x, point:n=>({x:0, y:n.y}),   along:n=>n.y},
+    {name:"right",  sort:(a,b)=>b.x-a.x, point:n=>({x:W, y:n.y}),   along:n=>n.y},
+  ];
+  for(const side of sides){
+    const cands=[...nodes].sort(side.sort).slice(0,10); const chosenPts=[];
+    for(const n of cands){
+      if(chosenPts.length>=3) break;
+      if(n.adj.length<1) continue;
+      if(chosenPts.some(v=>Math.abs(v-along0(side,n))<110)) continue;
+      const ep=side.point(n);
+      if(crossedRivers(n,ep).length || segPolylineCross(n,ep,railPath)) continue; // exits must not invent a bridge/crossing
+      let cross=false; for(const e of edges){ if(e.a===n.id||e.b===n.id) continue; if(edgesCross(n,ep,nodes[e.a],nodes[e.b])){ cross=true; break; } }
+      if(cross) continue;
+      const arterial = n.adj.some(ad=>ad.e.type==="arterial");
+      exits.push({nid:n.id, x:ep.x, y:ep.y, arterial});
+      chosenPts.push(along0(side,n));
+    }
+  }
+  function along0(side,n){ return side.along(n); }
+  return {chosen};
+}
+
+function draw(info){
+  const cv=document.getElementById("map"), ctx=cv.getContext("2d");
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#e9f2df"; ctx.fillRect(0,0,W,H);
+  // density shading: downtown glow
+  for(const hs of hotspots){ const g=ctx.createRadialGradient(hs.x,hs.y,10,hs.x,hs.y,hs.s*1.7); g.addColorStop(0,"rgba(214,226,196,0.85)"); g.addColorStop(1,"rgba(214,226,196,0)"); ctx.fillStyle=g; ctx.fillRect(hs.x-hs.s*1.8,hs.y-hs.s*1.8,hs.s*3.6,hs.s*3.6); }
+  // river (under everything)
+  for(const rp of riverPaths){ ctx.beginPath(); rp.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.strokeStyle="#9ec9e8"; ctx.lineWidth=46; ctx.lineCap="round"; ctx.lineJoin="round"; ctx.stroke(); ctx.strokeStyle="#7db6e2"; ctx.lineWidth=38; ctx.stroke(); }
+  // buildings: small rects near nodes, off river/rail
+  ctx.fillStyle="#e0d9c8";
+  nodes.forEach(n=>{ for(let k=0;k<2;k++){ const ang=(n.id*1.7+k*2.4)%6.28; const bx=n.x+Math.cos(ang)*22, by=n.y+Math.sin(ang)*19; const bp={x:bx,y:by}; if(distToRivers(bp)>32&&distToPath(bp,railPath)>16) ctx.fillRect(bx-7,by-5,13,9); } });
+  // roads casing + surface
+  function pass(wf,sf){ edges.forEach(e=>{ const A=nodes[e.a],B=nodes[e.b]; ctx.beginPath(); ctx.moveTo(A.x,A.y); ctx.lineTo(B.x,B.y); ctx.lineWidth=wf(e); ctx.strokeStyle=sf(e); ctx.lineCap="round"; ctx.stroke(); }); }
+  pass(e=>e.type==="arterial"?21:13, () => "#c6ccd1");
+  pass(e=>e.type==="arterial"?17:9, () => "#ffffff");
+  // exit roads to the frame edge
+  for(const passExit of [0,1]){ exits.forEach(ex=>{ const n=nodes[ex.nid]; ctx.beginPath(); ctx.moveTo(n.x,n.y); ctx.lineTo(ex.x,ex.y); ctx.lineWidth=passExit===0?(ex.arterial?21:13):(ex.arterial?17:9); ctx.strokeStyle=passExit===0?"#c6ccd1":"#ffffff"; ctx.lineCap="round"; ctx.stroke(); }); }
+  exits.forEach(ex=>{ if(!ex.arterial) return; const n=nodes[ex.nid]; ctx.beginPath(); ctx.moveTo(n.x,n.y); ctx.lineTo(ex.x,ex.y); ctx.lineWidth=2; ctx.strokeStyle="#f2c94c"; ctx.stroke(); });
+  // bridges: deck over river
+  bridgeSet.forEach(i=>{ const e=edges[i],A=nodes[e.a],B=nodes[e.b]; ctx.beginPath(); ctx.moveTo(A.x,A.y); ctx.lineTo(B.x,B.y); ctx.lineWidth=e.type==="arterial"?19:12; ctx.strokeStyle="#fdfdf6"; ctx.stroke(); ctx.beginPath(); ctx.moveTo(A.x,A.y); ctx.lineTo(B.x,B.y); ctx.lineWidth=e.type==="arterial"?19:12; ctx.strokeStyle="#9aa0a6"; ctx.setLineDash([5,7]); ctx.lineWidth=2; ctx.stroke(); ctx.setLineDash([]); });
+  pass(e=>e.type==="arterial"?2:0, () => "#f2c94c");
+  // railway: sleepers + two rails, drawn over roads except at crossings is fine visually (crossings marked)
+  if(railPath){
+    ctx.beginPath(); railPath.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.strokeStyle="#8d6e63"; ctx.lineWidth=9; ctx.stroke();
+    ctx.beginPath(); railPath.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.strokeStyle="#d7ccc8"; ctx.lineWidth=9; ctx.setLineDash([3,9]); ctx.stroke(); ctx.setLineDash([]);
+    ctx.beginPath(); railPath.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.strokeStyle="#616161"; ctx.lineWidth=5; ctx.stroke();
+    ctx.beginPath(); railPath.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y)); ctx.strokeStyle="#fafafa"; ctx.lineWidth=1.4; ctx.setLineDash([8,8]); ctx.stroke(); ctx.setLineDash([]);
+    // level crossings
+    crossingSet.forEach(i=>{ const e=edges[i],A=nodes[e.a],B=nodes[e.b]; const mx=(A.x+B.x)/2,my=(A.y+B.y)/2; ctx.beginPath(); ctx.arc(mx,my,7,0,7); ctx.fillStyle="#fdd835"; ctx.fill(); ctx.lineWidth=2; ctx.strokeStyle="#424242"; ctx.stroke(); ctx.font="9px sans-serif"; ctx.fillStyle="#212121"; ctx.textAlign="center"; ctx.fillText("✕",mx,my+3); });
+  }
+  if(document.getElementById("showPath").checked && bestPath.length>1){ ctx.beginPath(); bestPath.forEach((nid,i)=>{ const n=nodes[nid]; i===0?ctx.moveTo(n.x,n.y):ctx.lineTo(n.x,n.y); }); ctx.lineWidth=5; ctx.strokeStyle="#e8710a"; ctx.setLineDash([10,6]); ctx.stroke(); ctx.setLineDash([]); }
+  landmarks.forEach(m=>{ ctx.font="19px sans-serif"; ctx.textAlign="center"; ctx.fillText(m.icon, m.x, m.y); ctx.font="11px sans-serif"; ctx.fillStyle="#3c4043"; ctx.fillText(m.name, m.x, m.y+15); });
+  if(station){ ctx.font="20px sans-serif"; ctx.textAlign="center"; ctx.fillText("🚉", station.x, station.y-14); ctx.font="bold 12px sans-serif"; ctx.fillStyle="#202124"; ctx.fillText("駅", station.x, station.y-26); }
+  if(document.getElementById("showGraph").checked){ nodes.forEach(n=>{ ctx.beginPath(); ctx.arc(n.x,n.y,4,0,7); ctx.fillStyle="#7b1fa2"; ctx.fill(); ctx.font="10px sans-serif"; ctx.fillStyle="#7b1fa2"; ctx.textAlign="center"; ctx.fillText(n.id, n.x, n.y-8); }); }
+  function pin(nid,color,label){ const n=nodes[nid]; ctx.beginPath(); ctx.arc(n.x,n.y,13,0,7); ctx.fillStyle=color; ctx.fill(); ctx.lineWidth=3; ctx.strokeStyle="#fff"; ctx.stroke(); ctx.font="bold 12px sans-serif"; ctx.fillStyle="#fff"; ctx.textAlign="center"; ctx.fillText(label, n.x, n.y+4); }
+  pin(startId,"#1a73e8","S"); pin(goalId,"#d93025","G");
+  ctx.font="12px sans-serif"; ctx.fillStyle="#202124"; ctx.textAlign="center";
+  ctx.fillText("スタート", nodes[startId].x, nodes[startId].y-20); ctx.fillText("ゴール", nodes[goalId].x, nodes[goalId].y-20);
+  const deg=nodes.map(n=>n.adj.length);
+  const riverLabel= riverKinds.length? riverKinds.map(k=>({vertical:"縦",horizontal:"横",diagonal:"斜め"}[k])).join("＋") : "なし";
+  const railLabel= railPath? {vertical:"縦",horizontal:"横",diagonal:"斜め"}[railKind] : "なし";
+  document.getElementById("stats").innerHTML =
+    "<b>川</b>"+riverKinds.length+" 本（"+riverLabel+"）"+(riverKinds.length?"／橋 "+bridgeSet.size+" 本":"")+"<br>"+
+    "<b>線路</b>"+railLabel+(railPath?"（踏切 "+crossingSet.size+" か所）":"")+"<br>"+
+    "<b>繁華エリア</b>"+hotspots.length+" か所<br>"+
+    "<b>ノード数</b>"+nodes.length+"<br><b>エッジ数</b>"+edges.length+"<br>"+
+    "<b>突き当たり</b>"+deg.filter(d=>d===1).length+" か所<br>"+
+    "<b>最短ルート</b>"+info.chosen.d+" 手<br><b>曲がる回数</b>"+info.chosen.t+" 回";
+  function dirName(a,b){ const dx=b.x-a.x, dy=b.y-a.y; if(Math.abs(dx)>Math.abs(dy)) return dx>0?"東":"西"; return dy>0?"南":"北"; }
+  let txt="S から "; for(let i=0;i<bestPath.length-1;i++){ txt+=dirName(nodes[bestPath[i]],nodes[bestPath[i+1]]); if(i<bestPath.length-2) txt+=" → "; } txt+=" → G";
+  document.getElementById("pathText").textContent=txt;
+  document.getElementById("marks").innerHTML = landmarks.map(m=>m.icon+" "+m.name).join(" ／ ") + (station?" ／ 🚉 駅":"");
+}
+
+let currentSeed=20261126;
+function render(){ const info=generate(currentSeed, document.getElementById("riverSel").value, document.getElementById("railSel").value); draw(info); }
+document.getElementById("regen").onclick=()=>{ currentSeed=parseInt(document.getElementById("seed").value||"1",10); render(); };
+document.getElementById("next").onclick=()=>{ currentSeed++; document.getElementById("seed").value=currentSeed; render(); };
+document.getElementById("riverSel").onchange=render;
+document.getElementById("railSel").onchange=render;
+document.getElementById("showPath").onchange=render;
+document.getElementById("showGraph").onchange=render;
+render();
+</script>
+</body>
+</html>
