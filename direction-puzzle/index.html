@@ -405,12 +405,11 @@ async function translateStep(jaText){
   const enBox=document.getElementById("pipeEn");
   if(!translatorInstance && typeof Translator!=="undefined" && translatorState.startsWith("api:")){
     try{
-      const created=await withTimeout(Translator.create({sourceLanguage:"ja", targetLanguage:"en", monitor(m){ m.addEventListener("downloadprogress", e=>{ if(enBox) enBox.textContent="Translatorモデルをダウンロード中… "+Math.round((e.loaded||0)*100)+"%"; }); }}), 30000);
-      if(created) translatorInstance=created;
+      const created=await withTimeout(Translator.create({sourceLanguage:"ja", targetLanguage:"en", monitor(m){ m.addEventListener("downloadprogress", e=>{ if(enBox) enBox.textContent="Translatorモデルをダウンロード中… "+Math.round((e.loaded||0)*100)+"%"; }); }}), 15000);
+      if(created) translatorInstance=created; else if(enBox) enBox.textContent="Translatorの応答が15秒なかったため、フォールバック辞書で続行します";
     }catch(e){}
-    if(!translatorInstance){ try{ const c2=await withTimeout(Translator.create({sourceLanguage:"ja", targetLanguage:"en"}), 30000); if(c2) translatorInstance=c2; }catch(e){} }
   }
-  if(translatorInstance){ try{ const en=await withTimeout(translatorInstance.translate(normalized), 30000); if(en) return {normalized, en, via:"Translator API"}; }catch(e){} return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書（Translatorタイムアウト/失敗）"}; }
+  if(translatorInstance){ try{ const en=await withTimeout(translatorInstance.translate(normalized), 15000); if(en) return {normalized, en, via:"Translator API"}; }catch(e){} return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書（Translatorタイムアウト/失敗）"}; }
   return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書"};
 }
 // Step 2: Needle 2 adapter — real Wasm runtime if present, otherwise a deterministic emulator with the same tool-call format
@@ -489,6 +488,7 @@ async function runPipeline(){
   document.getElementById("pipeEn").textContent="翻訳中…（初回はTranslatorモデルのダウンロードで時間がかかることがあります）";
   document.getElementById("pipeRaw").textContent="推論中…";
   document.getElementById("pipeQueue").textContent="生成中…";
+  walkFromText(ja, sim=>{ const chk=document.getElementById("pipeCheck"); if(chk && !chk.innerHTML.includes("テスト")) chk.innerHTML="<b>NPC歩行</b>"+(sim.success?"🎉 クリア！":"失敗（詳細は上の歩行ログ・結果欄）"); });
   const {normalized, en, via}=await translateStep(ja);
   document.getElementById("pipeNorm").textContent=normalized;
   document.getElementById("pipeEn").textContent="["+via+"] "+en;
@@ -496,8 +496,6 @@ async function runPipeline(){
   document.getElementById("pipeRaw").textContent=Needle2.rawText(calls)||"（ツール呼び出しなし）";
   const queue=postProcess(calls);
   document.getElementById("pipeQueue").textContent=JSON.stringify(queue,null,2);
-  // also walk the NPC with the same directions (game parser), so the character actually moves
-  walkFromText(ja, sim=>{ const chk=document.getElementById("pipeCheck"); if(chk && !chk.innerHTML.includes("テスト")) chk.innerHTML="<b>NPC歩行</b>"+(sim.success?"🎉 クリア！":"失敗（詳細は上の歩行ログ・結果欄）"); });
   return {calls, queue};
 }
 document.getElementById("pipeRun").onclick=async()=>{ document.getElementById("pipeCheck").innerHTML=""; await runPipeline(); };
@@ -689,7 +687,7 @@ document.getElementById("exampleBtn").onclick=()=>{ document.getElementById("dir
 let lastInfo=null;
 let currentSeed=20261126;
 function render(){ const info=generate(currentSeed, document.getElementById("riverSel").value, document.getElementById("railSel").value); lastInfo=info; setupGame(); draw(info); }
-document.getElementById("regen").onclick=()=>{ currentSeed=parseInt(document.getElementById("seed").value||"1",10); render(); };
+document.getElementById("regen").onclick=()=>{ const ns=Math.floor(Math.random()*90000000)+10000000; document.getElementById("seed").value=ns; currentSeed=ns; render(); };
 document.getElementById("next").onclick=()=>{ currentSeed++; document.getElementById("seed").value=currentSeed; render(); };
 document.getElementById("riverSel").onchange=render;
 document.getElementById("railSel").onchange=render;
