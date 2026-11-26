@@ -3,15 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>一発指示・道案内パズル v0.6</title>
+<title>一発指示・道案内パズル v0.7</title>
 <style>
   *{box-sizing:border-box}
   body{margin:0;font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif;background:#f7f7f5;color:#202124}
-  header{padding:14px 18px 4px;max-width:1000px;margin:0 auto}
+  header{padding:14px 18px 4px;max-width:1440px;margin:0 auto}
   h1{font-size:19px;margin:0;font-weight:700}
   h1 .ver{font-size:12px;color:#80868b;font-weight:400;margin-left:8px}
-  main{max-width:1000px;margin:0 auto;padding:10px 18px 40px}
-  .mapwrap{background:#fff;border:1px solid #e0e0dc;border-radius:12px;padding:8px}
+  main{max-width:1440px;margin:0 auto;padding:10px 18px 40px;display:flex;gap:16px;align-items:flex-start}
+  .mapwrap{background:#fff;border:1px solid #e0e0dc;border-radius:12px;padding:8px;flex:1 1 auto;min-width:0}
+  .side{width:380px;flex:0 0 380px;display:flex;flex-direction:column;min-width:0}
+  .side .controls{margin-top:0}
+  @media (max-width:900px){ main{flex-direction:column} .side{width:auto;flex:none;width:100%} }
   canvas{width:100%;height:auto;display:block;border-radius:8px}
   .statsline{font-size:12px;color:#80868b;margin-top:6px;white-space:pre-wrap}
   .controls{margin-top:14px;background:#fff;border:1px solid #e0e0dc;border-radius:12px;padding:14px}
@@ -42,7 +45,7 @@
 </head>
 <body>
 <header>
-  <h1>一発指示・道案内パズル<span class="ver">v0.6</span></h1>
+  <h1>一発指示・道案内パズル<span class="ver">v0.7</span></h1>
 </header>
 <main>
   <div class="mapwrap">
@@ -50,6 +53,7 @@
     <div class="statsline" id="stats"></div>
   </div>
 
+  <div class="side">
   <section class="controls">
     <label for="directions">道順を入力（1回だけ）</label>
     <textarea id="directions" rows="3" placeholder="例：まっすぐ進んで、2つ目の交差点を右。コンビニの角を左に曲がって、橋を渡ってまっすぐ。公園の前で止まって。"></textarea>
@@ -131,6 +135,7 @@
       <div class="path" id="pipeQueue" style="max-height:300px;overflow:auto">-</div>
     </div>
   </details>
+  </div>
 </main>
 
 <script>
@@ -312,6 +317,23 @@ function generate(seed, riverOpt, railOpt){
   return {chosen};
 }
 
+function drawCharacter(x, y, heading){
+  const raw=Math.atan2(heading.y, heading.x);
+  const snap=Math.round(raw/(Math.PI/8))*(Math.PI/8); // 16 directions
+  ctx.save(); ctx.translate(x, y); ctx.rotate(snap+Math.PI/2); // local space: figure faces -y
+  // shadow
+  ctx.beginPath(); ctx.ellipse(0, 4, 10, 6, 0, 0, 7); ctx.fillStyle="rgba(0,0,0,0.18)"; ctx.fill();
+  // legs (plain mannequin limbs)
+  ctx.lineCap="round"; ctx.strokeStyle="#9aa0a6"; ctx.lineWidth=4.5;
+  ctx.beginPath(); ctx.moveTo(-3.5, 6); ctx.lineTo(-4.5, 12); ctx.moveTo(3.5, 6); ctx.lineTo(4.5, 12); ctx.stroke();
+  // arms
+  ctx.beginPath(); ctx.moveTo(-8, -1); ctx.lineTo(-10.5, 6); ctx.moveTo(8, -1); ctx.lineTo(10.5, 6); ctx.stroke();
+  // torso (matte light gray, featureless)
+  ctx.beginPath(); ctx.ellipse(0, 1, 8.5, 10, 0, 0, 7); ctx.fillStyle="#c9ccd1"; ctx.fill(); ctx.lineWidth=1.5; ctx.strokeStyle="#80868b"; ctx.stroke();
+  // head (plain sphere, no face)
+  ctx.beginPath(); ctx.arc(0, -4, 5.6, 0, 7); ctx.fillStyle="#dfe1e5"; ctx.fill(); ctx.lineWidth=1.5; ctx.strokeStyle="#80868b"; ctx.stroke();
+  ctx.restore();
+}
 function draw(info){
   const cv=document.getElementById("map"), ctx=cv.getContext("2d");
   ctx.clearRect(0,0,W,H);
@@ -350,11 +372,9 @@ function draw(info){
   pin(startId,"#1a73e8","S"); pin(goalId,"#d93025","G");
   ctx.font="12px sans-serif"; ctx.fillStyle="#202124"; ctx.textAlign="center";
   ctx.fillText("スタート", nodes[startId].x, nodes[startId].y-20); ctx.fillText("ゴール", nodes[goalId].x, nodes[goalId].y-20);
-  // NPC marker + initial heading arrow
+  // player character (top-down, facing snapped to 16 directions)
   const npc = walkPos || nodes[startId];
-  ctx.beginPath(); ctx.moveTo(npc.x,npc.y); ctx.lineTo(npc.x+headingVec.x*26, npc.y+headingVec.y*26); ctx.lineWidth=3; ctx.strokeStyle="#e8710a"; ctx.stroke();
-  ctx.beginPath(); ctx.arc(npc.x,npc.y,10,0,7); ctx.fillStyle="#fb8c00"; ctx.fill(); ctx.lineWidth=3; ctx.strokeStyle="#fff"; ctx.stroke();
-  ctx.font="12px sans-serif"; ctx.textAlign="center"; ctx.fillText("🧍", npc.x, npc.y+4);
+  drawCharacter(npc.x, npc.y, headingVec);
   const deg=nodes.map(n=>n.adj.length);
   const riverLabel= riverKinds.length? riverKinds.map(k=>({vertical:"縦",horizontal:"横",diagonal:"斜め"}[k])).join("＋") : "なし";
   const railLabel= railPath? {vertical:"縦",horizontal:"横",diagonal:"斜め"}[railKind] : "なし";
