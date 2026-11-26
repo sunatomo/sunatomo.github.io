@@ -537,7 +537,7 @@ function parseDirections(text){
     const isBridge=/橋|bridge/.test(low), isCross=/踏切|railway crossing|level crossing/.test(low);
     const isUturn=/振り返|後ろに戻|u-?turn|turn around/.test(low);
     const isStop=/止ま|到着|着い|stop|arrive/.test(low) && !isRight && !isLeft;
-    const isStraight=/直進|まっすぐ|直行|straight|forward/.test(low);
+    const isStraight=/直進|まっすぐ|真っ直ぐ|直ぐ|直行|straight|forward/.test(low);
     if(isUturn){ cues.push({type:"uturn"}); continue; }
     if(isBridge){ cues.push({type:"bridge"}); if(isRight||isLeft) cues.push({type:isRight?"right":"left", landmark, ord}); continue; }
     if(isCross){ cues.push({type:"crossing"}); if(isRight||isLeft) cues.push({type:isRight?"right":"left", landmark, ord}); continue; }
