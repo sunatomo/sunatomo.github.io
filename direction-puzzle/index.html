@@ -86,7 +86,7 @@
     <label style="display:block;margin-top:8px">道案内入力（パイプライン用）</label>
     <textarea id="pipeInput" rows="3" style="width:100%;padding:8px;border:1px solid #dadce0;border-radius:8px;font-size:14px" placeholder="日本語の道案内を入力"></textarea>
     <div class="row">
-      <button id="pipeRun">案内を送信</button>
+      <button id="pipeRun">案内を送信（キュー生成＋NPC歩行）</button>
       <button class="secondary" data-test="A">テストA</button>
       <button class="secondary" data-test="B">テストB</button>
       <button class="secondary" data-test="C">テストC</button>
@@ -358,7 +358,7 @@ async function initTranslator(){
       else translatorState="api:"+av+"（作成は送信ボタンのクリック時に行います）";
     } else translatorState="unavailable";
   }catch(e){ translatorState="error:"+(e&&e.message?e.message:e); }
-  if(st) st.innerHTML="Translator: "+translatorState+(translatorInstance?"（インスタンス保持中）":"（フォールバック辞書を使用）")+"<br>Needle 2: "+(typeof window!=="undefined" && window.__needle2Runtime? "Wasm接続済み" : "アダプタ（エミュレータ）で推論");
+  if(st) st.innerHTML="Translator: "+translatorState+(translatorInstance?"（インスタンス保持中）": translatorState==="unavailable"?"（フォールバック辞書を使用）":"")+"<br>Needle 2: "+(typeof window!=="undefined" && window.__needle2Runtime? "Wasm接続済み" : "アダプタ（エミュレータ）で推論");
   return translatorState;
 }
 // Step 1a: protect/normalize landmarks & fixed expressions before translation
@@ -399,10 +399,18 @@ function fallbackTranslate(text){
   }
   return out.join(", ");
 }
+function withTimeout(promise, ms){ return Promise.race([promise, new Promise(res=>setTimeout(()=>res(null), ms))]); }
 async function translateStep(jaText){
   const normalized=normalizeForTranslation(jaText);
-  if(!translatorInstance && typeof Translator!=="undefined" && translatorState.startsWith("api:")){ try{ translatorInstance=await Translator.create({sourceLanguage:"ja", targetLanguage:"en"}); }catch(e){} }
-  if(translatorInstance){ try{ const en=await translatorInstance.translate(normalized); return {normalized, en, via:"Translator API"}; }catch(e){} }
+  const enBox=document.getElementById("pipeEn");
+  if(!translatorInstance && typeof Translator!=="undefined" && translatorState.startsWith("api:")){
+    try{
+      const created=await withTimeout(Translator.create({sourceLanguage:"ja", targetLanguage:"en", monitor(m){ m.addEventListener("downloadprogress", e=>{ if(enBox) enBox.textContent="Translatorモデルをダウンロード中… "+Math.round((e.loaded||0)*100)+"%"; }); }}), 30000);
+      if(created) translatorInstance=created;
+    }catch(e){}
+    if(!translatorInstance){ try{ const c2=await withTimeout(Translator.create({sourceLanguage:"ja", targetLanguage:"en"}), 30000); if(c2) translatorInstance=c2; }catch(e){} }
+  }
+  if(translatorInstance){ try{ const en=await withTimeout(translatorInstance.translate(normalized), 30000); if(en) return {normalized, en, via:"Translator API"}; }catch(e){} return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書（Translatorタイムアウト/失敗）"}; }
   return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書"};
 }
 // Step 2: Needle 2 adapter — real Wasm runtime if present, otherwise a deterministic emulator with the same tool-call format
@@ -477,6 +485,10 @@ const TEST_PATTERNS={
 async function runPipeline(){
   const ja=document.getElementById("pipeInput").value.trim();
   if(!ja) return null;
+  document.getElementById("pipeNorm").textContent=normalizeForTranslation(ja);
+  document.getElementById("pipeEn").textContent="翻訳中…（初回はTranslatorモデルのダウンロードで時間がかかることがあります）";
+  document.getElementById("pipeRaw").textContent="推論中…";
+  document.getElementById("pipeQueue").textContent="生成中…";
   const {normalized, en, via}=await translateStep(ja);
   document.getElementById("pipeNorm").textContent=normalized;
   document.getElementById("pipeEn").textContent="["+via+"] "+en;
@@ -484,6 +496,8 @@ async function runPipeline(){
   document.getElementById("pipeRaw").textContent=Needle2.rawText(calls)||"（ツール呼び出しなし）";
   const queue=postProcess(calls);
   document.getElementById("pipeQueue").textContent=JSON.stringify(queue,null,2);
+  // also walk the NPC with the same directions (game parser), so the character actually moves
+  walkFromText(ja, sim=>{ const chk=document.getElementById("pipeCheck"); if(chk && !chk.innerHTML.includes("テスト")) chk.innerHTML="<b>NPC歩行</b>"+(sim.success?"🎉 クリア！":"失敗（詳細は上の歩行ログ・結果欄）"); });
   return {calls, queue};
 }
 document.getElementById("pipeRun").onclick=async()=>{ document.getElementById("pipeCheck").innerHTML=""; await runPipeline(); };
@@ -629,21 +643,26 @@ async function translateJaEn(text){
   }catch(e){ return null; }
   return null;
 }
+function walkFromText(text, onDone){
+  if(walking) return null;
+  const cues=parseDirections(text);
+  document.getElementById("cueBox").textContent = cues.length? cues.map((c,i)=>(i+1)+". "+cueLabel(c)).join("\n") : "行動キューを読み取れませんでした";
+  const sim=simulate(cues); lastSim=sim;
+  document.getElementById("walkLog").textContent = sim.log.length? sim.log.join("\n") : "（移動なし）";
+  animateWalk(sim, onDone);
+  return sim;
+}
 async function runGame(){
   if(submitted || walking) return;
   const ta=document.getElementById("directions"); const text=(ta.value||"").trim();
   if(!text){ document.getElementById("resultBox").innerHTML="<b>結果</b>道順が空です"; return; }
   submitted=true; ta.disabled=true; document.getElementById("goBtn").disabled=true;
-  const cues=parseDirections(text);
-  document.getElementById("cueBox").textContent = cues.length? cues.map((c,i)=>(i+1)+". "+cueLabel(c)).join("\n") : "行動キューを読み取れませんでした";
-  const sim=simulate(cues); lastSim=sim;
-  document.getElementById("walkLog").textContent = sim.log.length? sim.log.join("\n") : "（移動なし）";
-  animateWalk(sim);
+  walkFromText(text);
 }
-function animateWalk(sim){
+function animateWalk(sim, onDone){
   walking=true;
   const pts=sim.pathNodes.map(nid=>({x:nodes[nid].x, y:nodes[nid].y}));
-  if(pts.length<2){ finishWalk(sim); return; }
+  if(pts.length<2){ finishWalk(sim, onDone); return; }
   let seg=0, t0=null; const SEG_MS=420;
   function frame(ts){
     if(t0===null) t0=ts;
@@ -651,13 +670,13 @@ function animateWalk(sim){
     const A=pts[seg], B=pts[seg+1];
     walkPos={x:A.x+(B.x-A.x)*t, y:A.y+(B.y-A.y)*t};
     draw(lastInfo);
-    if(t>=1){ seg++; t0=null; if(seg>=pts.length-1){ finishWalk(sim); return; } }
+    if(t>=1){ seg++; t0=null; if(seg>=pts.length-1){ finishWalk(sim, onDone); return; } }
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 }
-function finishWalk(sim){
-  walking=false; const g=nodes[goalId];
+function finishWalk(sim, onDone){
+  walking=false; if(onDone) onDone(sim); const g=nodes[goalId];
   const d=Math.round(Math.hypot(nodes[sim.cur].x-g.x, nodes[sim.cur].y-g.y));
   document.getElementById("resultBox").innerHTML = sim.success
     ? "<b>結果</b>🎉 クリア！ ゴールに到着しました"
