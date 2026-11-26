@@ -30,6 +30,8 @@
 </style>
 </head>
 <body>
+<div id="errBox" style="display:none;background:#fce8e6;color:#a50e0e;padding:10px 14px;font-size:13px;white-space:pre-wrap"></div>
+<div id="bootStatus" style="background:#e8f0fe;color:#174ea6;padding:6px 14px;font-size:12px">起動中…</div>
 <header>
   <h1>一発指示・道案内パズル <span style="font-size:13px;color:#5f6368">地図生成＋フェーズ2 パイプライン v0.5</span></h1>
   <div class="sub">密な市街地と疎な郊外が混在する非格子グラフ／川（縦・横・斜め・なし）／線路（あり・なし）／川と線路の上に交差点は置かない・渡れるのは橋と踏切だけ</div>
@@ -104,6 +106,9 @@
 </main>
 <script>
 "use strict";
+function __showErr(msg){ const b=document.getElementById("errBox"); if(b){ b.style.display="block"; b.textContent="JSエラー: "+msg; } const s=document.getElementById("bootStatus"); if(s) s.textContent="起動失敗"; }
+window.addEventListener("error", e=>{ __showErr((e.message||"error")+" @ line "+(e.lineno||"?")); });
+window.addEventListener("unhandledrejection", e=>{ __showErr("Promise rejection: "+(e.reason&&e.reason.message?e.reason.message:e.reason)); });
 function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 let rand = mulberry32(1);
 const R=(a,b)=>a+rand()*(b-a);
@@ -676,7 +681,7 @@ document.getElementById("riverSel").onchange=render;
 document.getElementById("railSel").onchange=render;
 document.getElementById("showPath").onchange=render;
 document.getElementById("showGraph").onchange=render;
-render();
+try{ render(); document.getElementById("bootStatus").textContent="render OK: nodes="+nodes.length+" edges="+edges.length+" landmarks="+landmarks.length; }catch(err){ __showErr(err && err.stack ? err.stack : err); }
 </script>
 </body>
 </html>
