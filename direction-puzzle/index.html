@@ -318,6 +318,7 @@ function generate(seed, riverOpt, railOpt){
 }
 
 function drawCharacter(x, y, heading){
+  const ctx=document.getElementById("map").getContext("2d");
   const raw=Math.atan2(heading.y, heading.x);
   const snap=Math.round(raw/(Math.PI/8))*(Math.PI/8); // 16 directions
   ctx.save(); ctx.translate(x, y); ctx.rotate(snap+Math.PI/2); // local space: figure faces -y
