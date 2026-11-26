@@ -751,5 +751,7 @@ document.getElementById("showPath").onchange=render;
 document.getElementById("showGraph").onchange=render;
 render();
 </script>
+<div id="errBox" style="position:fixed;left:8px;bottom:8px;z-index:99;background:#fce8e6;color:#a50e0e;font:12px monospace;padding:8px;max-width:90vw;white-space:pre-wrap"></div>
+<script>window.addEventListener("error",function(e){var b=document.getElementById("errBox"); if(b) b.textContent="ERROR: "+e.message+" @ "+(e.filename||"")+":"+(e.lineno||"");});</script>
 </body>
 </html>
