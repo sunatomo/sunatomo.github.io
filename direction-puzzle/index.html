@@ -561,7 +561,7 @@ const LANDMARKS_EN={ "コンビニ":"convenience store", "カフェ":"cafe", "�
 function compass(v){ const names=["東","北東","北","北西","西","南西","南","南東"]; const ang=Math.atan2(-v.y, v.x); let i=Math.round(ang/(Math.PI/4)); i=((i%8)+8)%8; return names[i]; }
 function setupGame(){
   const sNode=nodes[startId];
-  if(sNode && sNode.adj.length){ initialNeighbor = sNode.adj[Math.floor(rand()*sNode.adj.length)].to; const t=nodes[initialNeighbor]; headingVec={x:t.x-sNode.x, y:t.y-sNode.y}; const L=Math.hypot(headingVec.x,headingVec.y)||1; headingVec={x:headingVec.x/L, y:headingVec.y/L}; }
+  if(sNode && sNode.adj.length){ initialNeighbor = (bestPath && bestPath.length>1)? bestPath[1] : sNode.adj[0].to; const t=nodes[initialNeighbor]; headingVec={x:t.x-sNode.x, y:t.y-sNode.y}; const L=Math.hypot(headingVec.x,headingVec.y)||1; headingVec={x:headingVec.x/L, y:headingVec.y/L}; }
   walkPos = sNode? {x:sNode.x, y:sNode.y} : null; submitted=false; walking=false; lastSim=null;
   const ns=document.getElementById("npcStatus"); if(ns) ns.innerHTML="<b>NPC</b>スタート地点で <b>"+compass(headingVec)+"向き</b> に立っています";
   const rb=document.getElementById("resultBox"); if(rb) rb.innerHTML="";
