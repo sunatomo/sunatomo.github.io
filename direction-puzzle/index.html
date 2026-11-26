@@ -569,11 +569,11 @@ function simulate(cues){
   function stepRank(side, rank){ const ex=exitsByAngle(); const ordered = side==="right"? [...ex].reverse() : ex; const chosen=ordered[rank-1]; if(!chosen) return false; moveTo(chosen.to, (side==="right"?"右":"左")+"から"+rank+"番目の道へ"); return true; }
   function stepUturn(){ if(prev!==null){ moveTo(prev,"振り返る"); return true; } let best=null,bd=2; for(const ad of nodes[cur].adj){ const d=edgeDir(cur,ad.to); const dot=d.x*heading.x+d.y*heading.y; if(dot<bd){ bd=dot; best=ad.to; } } if(best===null) return false; moveTo(best,"振り返る"); return true; }
   function nodeLandmark(nid){ const m=landmarks.find(m=>m.nid===nid); if(m) return m.name; if(station&&station.nid===nid) return "駅"; return null; }
-  let fail=null;
+  let fail=null, stopped=false;
   for(const cue of cues){
     if(moves>MAX){ fail="歩きすぎて力尽きた"; break; }
     if(cur===goalId) break;
-    if(cue.type==="stop") break;
+    if(cue.type==="stop"){ stopped=true; break; }
     else if(cue.type==="straight"){ if(!stepStraight()){ fail="行き止まりで進めなかった"; break; } }
     else if(cue.type==="uturn"){ if(!stepUturn()){ fail="振り返れなかった"; break; } }
     else if(cue.type==="rank"){ if(!stepRank(cue.side, cue.rank)){ fail="その道がなかった"; break; } }
@@ -587,7 +587,7 @@ function simulate(cues){
     if(cur===goalId) break;
   }
   const success = cur===goalId;
-  return {success, fail, cur, pathNodes, log};
+  return {success, fail, stopped, cur, pathNodes, log};
 }
 function exampleDirections(){
   // classify each step by which exit the correct road is: straightest / rightmost / leftmost / ranked
@@ -678,7 +678,7 @@ function finishWalk(sim, onDone){
   const d=Math.round(Math.hypot(nodes[sim.cur].x-g.x, nodes[sim.cur].y-g.y));
   document.getElementById("resultBox").innerHTML = sim.success
     ? "<b>結果</b>🎉 クリア！ ゴールに到着しました"
-    : "<b>結果</b>失敗… "+(sim.fail||"道順が尽きた")+"（ゴールまで直線 約"+d+"px）";
+    : "<b>結果</b>"+(sim.stopped && !sim.fail ? "指示どおり停止しました（ゴール未到達）" : "失敗… "+(sim.fail||"道順が尽きた"))+"（ゴールまで直線 約"+d+"px）";
   draw(lastInfo);
 }
 document.getElementById("goBtn").onclick=runGame;
