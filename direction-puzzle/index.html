@@ -353,8 +353,9 @@ async function initTranslator(){
   try{
     if(typeof Translator!=="undefined"){
       const av=await Translator.availability({sourceLanguage:"ja", targetLanguage:"en"});
-      if(av!=="unavailable"){ translatorInstance=await Translator.create({sourceLanguage:"ja", targetLanguage:"en"}); translatorState="api:"+av; }
-      else translatorState="unavailable";
+      if(av==="available"){ translatorInstance=await Translator.create({sourceLanguage:"ja", targetLanguage:"en"}); translatorState="api:available"; }
+      else if(av==="unavailable") translatorState="unavailable";
+      else translatorState="api:"+av+"（作成は送信ボタンのクリック時に行います）";
     } else translatorState="unavailable";
   }catch(e){ translatorState="error:"+(e&&e.message?e.message:e); }
   if(st) st.innerHTML="Translator: "+translatorState+(translatorInstance?"（インスタンス保持中）":"（フォールバック辞書を使用）")+"<br>Needle 2: "+(typeof window!=="undefined" && window.__needle2Runtime? "Wasm接続済み" : "アダプタ（エミュレータ）で推論");
@@ -400,6 +401,7 @@ function fallbackTranslate(text){
 }
 async function translateStep(jaText){
   const normalized=normalizeForTranslation(jaText);
+  if(!translatorInstance && typeof Translator!=="undefined" && translatorState.startsWith("api:")){ try{ translatorInstance=await Translator.create({sourceLanguage:"ja", targetLanguage:"en"}); }catch(e){} }
   if(translatorInstance){ try{ const en=await translatorInstance.translate(normalized); return {normalized, en, via:"Translator API"}; }catch(e){} }
   return {normalized, en:fallbackTranslate(jaText), via:"フォールバック辞書"};
 }
