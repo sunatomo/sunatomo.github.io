@@ -716,7 +716,7 @@ function finishWalk(sim, onDone){
   draw(lastInfo);
 }
 document.getElementById("goBtn").onclick=runGame;
-document.getElementById("resetBtn").onclick=()=>{ walkSeq++; walking=false; submitted=false; const ta=document.getElementById("directions"); ta.disabled=false; document.getElementById("goBtn").disabled=false; npcPos={...nodes[startId]}; document.getElementById("resultBox").innerHTML=""; document.getElementById("walkLog").textContent="-"; document.getElementById("cueBox").textContent="まだ入力されていません"; draw(lastInfo); };
+document.getElementById("resetBtn").onclick=()=>{ walkSeq++; setupGame(); draw(lastInfo); };
 document.getElementById("exampleBtn").onclick=()=>{ document.getElementById("directions").value=exampleDirections(); };
 
 let lastInfo=null;
